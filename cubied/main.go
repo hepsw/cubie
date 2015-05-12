@@ -50,7 +50,7 @@ func main() {
 	}
 
 	if flag.NArg() > 0 {
-		ctl.procs = append(ctl.procs, newProcess(flag.Args()...))
+		ctl.cmd = newProcess(flag.Args()...)
 	}
 
 	go func() {
@@ -78,10 +78,11 @@ var procKey procKeyType = 0
 
 // Process represents a process to be launched and how it needs to be launched.
 type Process struct {
-	Cmd  string            // Cmd is the name of the command to be launched
-	Args []string          // Args holds command-line arguments, excluding the command name
-	Env  map[string]string // Env specifies the environment of the command
-	Dir  string            // Dir specifies the working directory of the command
+	Cmd    string            // Cmd is the name of the command to be launched
+	Args   []string          // Args holds command-line arguments, excluding the command name
+	Env    map[string]string // Env specifies the environment of the command
+	Dir    string            // Dir specifies the working directory of the command
+	Daemon bool
 
 	proc *exec.Cmd
 	err  error
@@ -107,18 +108,26 @@ func (p *Process) title() string {
 
 func (p *Process) run(done chan *Process) {
 	defer func() { done <- p }()
-	log.Printf("starting [%s]...\n", p.title())
-	p.err = p.proc.Start()
-	if p.err != nil {
-		return
-	}
+	if !p.Daemon {
+		log.Printf("running [%s]...\n", p.title())
+		p.err = p.proc.Run()
+		log.Printf("running [%s]... [done]\n", p.title())
+	} else {
+		log.Printf("starting [%s]...\n", p.title())
+		p.err = p.proc.Start()
+		if p.err != nil {
+			return
+		}
 
-	p.err = p.proc.Wait()
+		p.err = p.proc.Wait()
+		log.Printf("running [%s]... [done]\n", p.title())
+	}
 	return
 }
 
 // Control runs and manages processes.
 type Control struct {
+	cmd   *Process
 	procs []*Process
 	quit  chan struct{}
 }
@@ -134,33 +143,34 @@ func NewControl() *Control {
 
 // run runs all processes according to cubie configuration.
 func (ctl *Control) run() {
-	for i := range ctl.procs {
-		proc := ctl.procs[i]
-		proc.proc = exec.Command(proc.Cmd, proc.Args...)
-		if len(proc.Env) > 0 {
-			env := make([]string, 0, len(proc.Env))
-			for k, v := range proc.Env {
-				env = append(env, k+"="+v)
-			}
-			proc.proc.Env = env
-			log.Printf("env[%s]: %v\n", proc.title(), env)
-		}
+	ctl.runProcs()
+	ctl.runCmd()
+}
 
-		if proc.Dir != "" {
-			proc.proc.Dir = proc.Dir
+func (ctl *Control) setupProc(proc *Process) {
+	proc.proc = exec.Command(proc.Cmd, proc.Args...)
+	if len(proc.Env) > 0 {
+		env := make([]string, 0, len(proc.Env))
+		for k, v := range proc.Env {
+			env = append(env, k+"="+v)
 		}
-		// create a process group for this process.
-		proc.proc.SysProcAttr = &syscall.SysProcAttr{
-			Setpgid: true,
-		}
-
-		proc.proc.Stdout = os.Stdout
-		proc.proc.Stderr = os.Stderr
-		proc.proc.Stdin = os.Stdin
+		proc.proc.Env = env
 	}
+
+	if proc.Dir != "" {
+		proc.proc.Dir = proc.Dir
+	}
+
+	proc.proc.Stdout = os.Stdout
+	proc.proc.Stderr = os.Stderr
+	proc.proc.Stdin = os.Stdin
+}
+
+func (ctl *Control) runProcs() {
 
 	done := make(chan *Process)
 	for _, p := range ctl.procs {
+		ctl.setupProc(p)
 		go p.run(done)
 	}
 
@@ -196,11 +206,44 @@ func (ctl *Control) run() {
 	}
 }
 
+func (ctl *Control) runCmd() {
+	if ctl.cmd == nil {
+		return
+	}
+	done := make(chan *Process)
+	ctl.setupProc(ctl.cmd)
+	go ctl.cmd.run(done)
+
+	for {
+		select {
+		case <-ctl.quit:
+			ctl.killProcs()
+			return
+
+		case p := <-done:
+			if p.err != nil {
+				ctl.killProcs()
+				log.Fatalf("error running process [%v]: %v\n", p.title(), p.err)
+			}
+			return
+		}
+	}
+}
+
 func (ctl *Control) killProcs() error {
 	var err error
 	for _, p := range ctl.procs {
+		if p.proc == nil {
+			continue
+		}
 		errp := killProc(p.proc.Process)
 		if errp != nil && err != nil {
+			err = errp
+		}
+	}
+	if ctl.cmd != nil && ctl.cmd.proc != nil {
+		errp := killProc(ctl.cmd.proc.Process)
+		if err != nil && err != nil {
 			err = errp
 		}
 	}
