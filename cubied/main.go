@@ -143,7 +143,7 @@ func NewControl() *Control {
 
 // run runs all processes according to cubie configuration.
 func (ctl *Control) run() {
-	ctl.runProcs()
+	go ctl.runProcs()
 	ctl.runCmd()
 }
 
