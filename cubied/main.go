@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 )
 
@@ -143,7 +144,26 @@ func NewControl() *Control {
 
 // run runs all processes according to cubie configuration.
 func (ctl *Control) run() {
-	go ctl.runProcs()
+
+	n := 0
+	for _, p := range ctl.procs {
+		if !p.Daemon {
+			n++
+		}
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(n)
+	nprocs := ""
+	if n > 1 {
+		nprocs = "es"
+	}
+	log.Printf("starting %d go-process%s...\n", n, nprocs)
+
+	go ctl.runProcs(&wg)
+	wg.Wait()
+
+	log.Printf("now running main go-process...\n")
 	ctl.runCmd()
 }
 
@@ -166,7 +186,7 @@ func (ctl *Control) setupProc(proc *Process) {
 	proc.proc.Stdin = os.Stdin
 }
 
-func (ctl *Control) runProcs() {
+func (ctl *Control) runProcs(wg *sync.WaitGroup) {
 
 	done := make(chan *Process)
 	for _, p := range ctl.procs {
@@ -181,6 +201,7 @@ func (ctl *Control) runProcs() {
 			return
 
 		case p := <-done:
+			wg.Done()
 			i := -1
 			for j, pp := range ctl.procs {
 				if pp == p {
