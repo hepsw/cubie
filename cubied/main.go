@@ -13,7 +13,12 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
+
+// PR_SET_CHILD_SUBREAPER is defined in <sys/prctl.h> for linux >= 3.4
+const PR_SET_CHILD_SUBREAPER = 36
 
 var (
 	confDir = flag.String("conf", "/etc/cubie.d", "directory holding cubie configuration files")
@@ -25,6 +30,12 @@ func main() {
 	flag.Parse()
 
 	log.Printf("::: starting cubie-daemon [%v]...\n", Version)
+
+	if os.Getpid() != 1 {
+		// try to register as a subreaper
+		err := unix.Prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0)
+		log.Printf("subreaper: %v\n", err == nil)
+	}
 
 	confs, err := filepath.Glob(filepath.Join(*confDir, "*.conf"))
 	if err != nil {
