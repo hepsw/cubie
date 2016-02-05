@@ -119,27 +119,27 @@ func (p *Process) title() string {
 	return strings.Join(p.proc.Args, " ")
 }
 
-func (p *Process) wait() error {
-	var err1 error
-	var status syscall.WaitStatus
-	_, err1 = syscall.Wait4(p.proc.Process.Pid, &status, syscall.WALL|0, nil)
-	return err1
-}
-
 func (p *Process) run(done chan *Process) {
 	p.proc.SysProcAttr = &syscall.SysProcAttr{
 		Setpgid: true,
 	}
 
 	defer func() { done <- p }()
-	log.Printf("starting [%s]...\n", p.title())
-	p.err = p.proc.Start()
-	if p.err != nil {
-		return
-	}
 
-	p.err = p.wait()
-	log.Printf("running [%s]... [done]\n", p.title())
+	if !p.Daemon {
+		log.Printf("running [%s]...\n", p.title())
+		p.err = p.proc.Run()
+		log.Printf("running [%s]... [done]\n", p.title())
+	} else {
+		log.Printf("starting [%s]...\n", p.title())
+		p.err = p.proc.Start()
+		if p.err != nil {
+			return
+		}
+
+		p.err = p.proc.Wait()
+		log.Printf("running [%s]... [done]\n", p.title())
+	}
 	return
 }
 
