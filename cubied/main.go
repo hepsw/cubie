@@ -120,8 +120,10 @@ func (p *Process) title() string {
 }
 
 func (p *Process) run(done chan *Process) {
-	p.proc.SysProcAttr = &syscall.SysProcAttr{
-		Setpgid: true,
+	if p.Daemon {
+		p.proc.SysProcAttr = &syscall.SysProcAttr{
+			Setpgid: true,
+		}
 	}
 
 	defer func() { done <- p }()
