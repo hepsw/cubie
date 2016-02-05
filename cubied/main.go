@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 )
 
 var (
@@ -107,27 +108,33 @@ func (p *Process) title() string {
 	return strings.Join(p.proc.Args, " ")
 }
 
-func (p *Process) run(done chan *Process) {
-	defer func() { done <- p }()
-	if !p.Daemon {
-		log.Printf("running [%s]...\n", p.title())
-		p.err = p.proc.Run()
-		log.Printf("running [%s]... [done]\n", p.title())
-	} else {
-		log.Printf("starting [%s]...\n", p.title())
-		p.err = p.proc.Start()
-		if p.err != nil {
-			return
-		}
+func (p *Process) wait() error {
+	var err1 error
+	var status syscall.WaitStatus
+	_, err1 = syscall.Wait4(p.proc.Process.Pid, &status, syscall.WALL|0, nil)
+	return err1
+}
 
-		p.err = p.proc.Wait()
-		log.Printf("running [%s]... [done]\n", p.title())
+func (p *Process) run(done chan *Process) {
+	p.proc.SysProcAttr = &syscall.SysProcAttr{
+		Setpgid: true,
 	}
+
+	defer func() { done <- p }()
+	log.Printf("starting [%s]...\n", p.title())
+	p.err = p.proc.Start()
+	if p.err != nil {
+		return
+	}
+
+	p.err = p.wait()
+	log.Printf("running [%s]... [done]\n", p.title())
 	return
 }
 
 // Control runs and manages processes.
 type Control struct {
+	pid   int
 	cmd   *Process
 	procs []*Process
 	quit  chan struct{}
@@ -136,6 +143,7 @@ type Control struct {
 // NewControl creates a Control handle.
 func NewControl() *Control {
 	ctl := &Control{
+		pid:   os.Getpid(),
 		procs: make([]*Process, 0, 2),
 		quit:  make(chan struct{}),
 	}
@@ -144,7 +152,6 @@ func NewControl() *Control {
 
 // run runs all processes according to cubie configuration.
 func (ctl *Control) run() {
-
 	n := 0
 	for _, p := range ctl.procs {
 		if !p.Daemon {
@@ -194,14 +201,45 @@ func (ctl *Control) runProcs(wg *sync.WaitGroup) {
 		go p.run(done)
 	}
 
+	sigch := make(chan os.Signal)
+	signal.Notify(sigch, syscall.SIGCHLD)
+
+reaploop:
 	for {
 		select {
 		case <-ctl.quit:
 			ctl.killProcs()
 			return
 
+		case <-sigch:
+			const nretries = 1000
+			var ws syscall.WaitStatus
+			for i := 0; i < nretries; i++ {
+				pid, err := syscall.Wait4(ctl.pid, &ws, syscall.WNOHANG, nil)
+				// pid > 0 => pid is the ID of the child that died, but
+				//  there could be other children that are signalling us
+				//  and not the one we in particular are waiting for.
+				// pid -1 && errno == ECHILD => no new status children
+				// pid -1 && errno != ECHILD => syscall interupped by signal
+				// pid == 0 => no more children to wait for.
+				switch {
+				case err != nil:
+					continue reaploop
+				case pid == ctl.pid:
+					return
+				case pid == 0:
+					// this is what we get when SIGSTOP is sent on OSX. ws == 0 in this case.
+					// Note that on OSX we never get a SIGCONT signal.
+					// Under WNOHANG, pid == 0 means there is nobody left to wait for,
+					// so just go back to waiting for another SIGCHLD.
+					continue reaploop
+				default:
+					time.Sleep(time.Millisecond)
+				}
+			}
+			log.Fatalf("failed to reap children after [%d] retries\n", nretries)
+
 		case p := <-done:
-			wg.Done()
 			i := -1
 			for j, pp := range ctl.procs {
 				if pp == p {
@@ -216,6 +254,7 @@ func (ctl *Control) runProcs(wg *sync.WaitGroup) {
 			nprocs := len(ctl.procs)
 			ctl.procs[nprocs-1], ctl.procs = nil, append(ctl.procs[:i], ctl.procs[i+1:]...)
 			ctl.procs = ctl.procs[:len(ctl.procs):len(ctl.procs)]
+			wg.Done()
 			if p.err != nil {
 				ctl.killProcs()
 				log.Fatalf("error running process [%v]: %v\n", p.title(), p.err)
